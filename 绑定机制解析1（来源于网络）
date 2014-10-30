@@ -1,0 +1,185 @@
+通过SimpleApp例程理解绑定的流程（一） 2010-12-04 10:59:45
+分类： 嵌入式
+有两种可用的机制配置设备的绑定
+（1）如果目的设备的扩展地址是已知的，则调用zb_BindDeviceRequest()函数能创建一个绑定条目
+（2）如果扩展地址是未知的，则通过“JoyStick”按键的辅助进行绑定操作，在这种情况下，这个目的设备首先要处于一种状态，也是就说目的设备应该是允许被绑定的状态。它将被zb_AllowBindResponse()发出一个匹配响应；然后在源设备处，zb_BindDeviceRequest()函数带着空地址发出。
+（1） 已知扩展地址的绑定
+这里可以直接调用函数zb_BindDeviceRequest()发起绑定请求
+void zb_BindDevice ( uint8 create, //是否创建绑定，TRUE则创建，FALSE则解除，创建和解除其实都是这个函数，只是这里传递的参数不同而已
+                                 uint16 commandId, //命令ID，基于命令的绑定
+                                   uint8 *pDestination );//指向扩展地址指针
+该函数的代码如下;
+void zb_BindDevice ( uint8 create, uint16 commandId, uint8 *pDestination )
+{
+  zAddrType_t destination;
+  uint8 ret = ZB_ALREADY_IN_PROGRESS;
+ 
+  if ( create ) //如果是TRUE，也就是意味着是建立绑定
+  {
+    if (sapi_bindInProgress == 0xffff)//如果在这个命令上没有创建绑定
+    {
+      if ( pDestination ) //已知扩展地址的绑定，即：*pDestination为非NULL
+      {
+        destination.addrMode = Addr64Bit;
+        osal_cpyExtAddr( destination.addr.extAddr, pDestination );//复制扩展地址
+     //调用APS绑定请求函数
+        ret = APSME_BindRequest( sapi_epDesc.endPoint, //源EP
+commandId, //命令ID
+                                &destination, //目的设备地址模式
+api_epDesc.endPoint );//目的EP
+ 
+        if ( ret == ZSuccess )//绑定成功
+        {
+          // Find nwk addr 发现网络地址，得到被绑定的设备的短地址
+          ZDP_NwkAddrReq(pDestination, ZDP_ADDR_REQTYPE_SINGLE, 0, 0 );
+          osal_start_timerEx( ZDAppTaskID, ZDO_NWK_UPDATE_NV, 250 );
+        }
+      }
+      else //未知扩展地址的绑定 *pDestination为NULL
+      {
+        ret = ZB_INVALID_PARAMETER;
+        destination.addrMode = Addr16Bit; //设置16位短地址
+        destination.addr.shortAddr = NWK_BROADCAST_SHORTADDR;//广播模式
+//比较输出簇commandId是否和本终端输出簇列表中有匹配项，成功匹配返回TRUE
+        if(ZDO_AnyClusterMatches(1,&commandId,
+sapi_epDesc.simpleDesc->AppNumOutClusters,
+                                sapi_epDesc.simpleDesc->pAppOutClusterList ) )
+        {
+          // Try to match with a device in the allow bind mode 匹配一个在允许绑定模式下的设备
+          ret = ZDP_MatchDescReq( &destination, NWK_BROADCAST_SHORTADDR,
+              sapi_epDesc.simpleDesc->AppProfId, 1, &commandId, 0, (cId_t *)NULL, 0 );
+        }
+//如果commandId是输入簇，则查找本地输入簇列表中是否有匹配项
+        else  if(  ZDO_AnyClusterMatches(1,&commandId, sapi_epDesc.simpleDesc->AppNumInClusters,
+                 sapi_epDesc.simpleDesc->pAppInClusterList ) )
+        { //匹配一个在允许绑定模式的设备
+          ret = ZDP_MatchDescReq( &destination, NWK_BROADCAST_SHORTADDR,
+              sapi_epDesc.simpleDesc->AppProfId, 0, (cId_t *)NULL, 1, &commandId, 0 );
+        }
+ 
+        if ( ret == ZB_SUCCESS )//如果匹配成功
+        {
+          // Set a timer to make sure bind completes 设置一个时间，确保绑定完成
+          osal_start_timerEx(sapi_TaskID, ZB_BIND_TIMER, AIB_MaxBindingTime);
+          sapi_bindInProgress = commandId; //允许基于命令的绑定过程
+          return; // dont send cback event
+        }
+      }
+    }
+ 
+    SAPI_SendCback( SAPICB_BIND_CNF, ret, commandId );
+  }
+  else //create=FALSE 解除绑定
+  {
+    // Remove local bindings for the commandId
+    BindingEntry_t *pBind;
+ 
+    // Loop through bindings an remove any that match the cluster
+    while ( pBind = bindFind( sapi_epDesc.simpleDesc->EndPoint, commandId, 0 ) )
+    {
+      bindRemoveEntry(pBind); //完成从绑定表格中移除绑定条目
+    }
+    osal_start_timerEx( ZDAppTaskID, ZDO_NWK_UPDATE_NV, 250 );
+  }
+  return;
+}
+说明：（1）zAddrType_t destination; 其中的用到的数据结构
+typedef struct
+{
+  union
+  {
+    uint16      shortAddr;
+    ZLongAddr_t extAddr;
+  } addr;
+  byte addrMode;
+} zAddrType_t;
+ 
+enum
+{
+  AddrNotPresent = 0,
+  AddrGroup = 1,
+  Addr16Bit = 2,
+  Addr64Bit = 3,
+  AddrBroadcast = 15
+};
+（2)在上面调用了APS绑定函数APSME_BindRequest（），该函数描述如下：
+ ZStatus_t APSME_BindRequest( byte SrcEndpInt, uint16 ClusterId,
+                                   zAddrType_t *DstAddr, byte DstEndpInt);
+   在两个设备上建立绑定，该函数通过PASME-BIND.confirm原语返回，而且这两者是不可分割的。这个函数好像是不开源的，在文件中没有找到该函数的源代码。如果绑定成功，则调用函数ZDP_NwkAddReq()得到目的短地址。
+afStatus_t ZDP_NwkAddrReq( byte *IEEEAddress, byte ReqType,
+                           byte StartIndex, byte SecurityEnable )
+ReqType 为想得到的相应类型，它的值可能是以下二者之一：
+ZDP_NWKADDR_REQTYPE_SINGLE:：返回设备的短地址和扩展地址
+ZDP_NWKADDR_REQTYPE_EXTENDED：返回短地址和扩展地址和所有相关的设备的短地址。
+        调用该函数可以产生一个根据已知远程设备的IEEE地址，请求得到16位短地址的信息。并且该信息以广播方式发送到网络中的所有设备。
+afStatus_t ZDP_NwkAddrReq( byte *IEEEAddress, byte ReqType,
+                           byte StartIndex, byte SecurityEnable )
+{
+  byte *pBuf = ZDP_TmpBuf;
+  byte len = Z_EXTADDR_LEN + 1 + 1;  // IEEEAddress + ReqType + StartIndex.
+  zAddrType_t dstAddr;
+ 
+  if ( osal_ExtAddrEqual( saveExtAddr, IEEEAddress ) == FALSE )
+  {
+    dstAddr.addrMode = AddrBroadcast;
+    dstAddr.addr.shortAddr = NWK_BROADCAST_SHORTADDR;
+  }
+  else
+  {
+    dstAddr.addrMode = Addr16Bit;
+//把得到的16位短地址赋值给dstAddr.addr.shortAddr
+    dstAddr.addr.shortAddr = ZDAppNwkAddr.addr.shortAddr;
+  }
+ 
+  pBuf = osal_cpyExtAddr( pBuf, IEEEAddress );
+ 
+  *pBuf++ = ReqType;
+  *pBuf++ = StartIndex;
+ 
+  return fillAndSend( &ZDP_TransID, &dstAddr, NWK_addr_req, len );
+}
+     网络中的短地址最终是从那里得到呢？通过下面的ZDApp_RestoreNetworkState（）函数，调用NLME_GetShortAddr()函数，得到网络的短地址，该函数也是不开源的。其中，ZDApp_RestoreNetworkState（）函数，会在uint8 ZDOInitDevice( uint16 startDelay )函数中调用。
+uint8 ZDApp_RestoreNetworkState( void )
+{
+．．．．．．．．．．．．．．．．．．．．．．．．．．
+nvStat = NLME_InitNV();
+  if ( nvStat != NV_OPER_FAILED )
+  {
+    if ( NLME_RestoreFromNV() )
+    {
+      // Are we a coordinator
+      ZDAppNwkAddr.addr.shortAddr = NLME_GetShortAddr();
+      if ( ZDAppNwkAddr.addr.shortAddr == 0 )
+      {
+        ZDO_Config_Node_Descriptor.LogicalType = NODETYPE_COORDINATOR;
+      }
+      devStartMode = MODE_RESUME;
+．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．
+} }
+如果网络中的状态有变化时，会从新得到网络中的短地址。
+void ZDO_UpdateNwkStatus( devStates_t state )
+{
+  // Endpoint/Interface descriptor list.
+  epList_t *epDesc = epList;
+  byte bufLen = sizeof(osal_event_hdr_t);
+  osal_event_hdr_t *msgPtr;
+  ZDAppNwkAddr.addr.shortAddr = NLME_GetShortAddr();
+  (void)NLME_GetExtAddr();  // Load the saveExtAddr pointer.
+．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．
+}
+ 
+static afStatus_t fillAndSend( uint8 *transSeq, zAddrType_t *addr, cId_t clusterID, byte len )
+{
+  afAddrType_t afAddr;
+ 
+  ZADDR_TO_AFADDR( addr, afAddr );
+ 
+  *(ZDP_TmpBuf-1) = *transSeq;
+ //通过AF_DataRequest函数发送得到的短地址
+  return AF_DataRequest( &afAddr, &ZDApp_epDesc, clusterID,
+                           (uint16)(len+1), (uint8*)(ZDP_TmpBuf-1),
+                           transSeq, ZDP_TxOptions,  AF_DEFAULT_RADIUS );
+ 
+}
+（3）sapi_bindInProgress == 0xffff，变量，在void SAPI_Init( byte task_id )函数中，首先被初始化0xffff。在void zb_BindDevice ( uint8 create, uint16 commandId, uint8 *pDestination )
+函数中被赋值为commandId
