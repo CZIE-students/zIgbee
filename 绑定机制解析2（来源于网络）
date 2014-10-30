@@ -1,0 +1,174 @@
+ 通过SimpleApp例程理解绑定的流程（二） 2010-12-04 11:16:46
+分类： 嵌入式
+      在上一篇文章中主要描述了第一种已知扩展地址的绑定，这一篇是未知扩展地址的绑定，这种方式会稍微复杂一点。
+2. 未知扩展地址的绑定
+    该绑定方式下，在发送请求之前，先要让被绑定的目的设备处于允许绑定模式。可以调用函数zb_AllowBind()进入该模式，在一定的周期内该函数可以使设备处于允许绑定的状态。通过调用zb_BindDevice()函数实现两个设备的真正绑定。下面是其源代码；
+void zb_AllowBind ( uint8 timeout )
+{
+  osal_stop_timerEx(sapi_TaskID, ZB_ALLOW_BIND_TIMER);
+  if ( timeout == 0 )
+  {
+    afSetMatch(sapi_epDesc.simpleDesc->EndPoint, FALSE);
+  }
+  else
+  {
+    afSetMatch(sapi_epDesc.simpleDesc->EndPoint, TRUE);//设置允许设备响应ZDO的描述符匹配请求
+    if ( timeout != 0xFF )
+    {
+      if ( timeout > 64 )
+      {
+        timeout = 64;
+      }
+//匹配允许后，设置了一个定义器，定义的时间是timeout*1000，定时时间一到，就会触发sapi_TaskID任务中的ZB_ALLOW_BIND_TIMER事件，在SAPI_ProcessEvent（）函数中，对其进行处理，这个不是强制事件类型的子集，是用户定义的
+#define ZB_ALLOW_BIND_TIMER               0x4000    //0x0001
+      osal_start_timerEx(sapi_TaskID, ZB_ALLOW_BIND_TIMER, timeout*1000);
+    }
+  }
+  return;
+}
+   参数timeout是进行绑定模式持续的时间，单位是秒，如果设置timeout=0xFF,则设备在任何时候都可以允许绑定，如果设置timeout=0x00,设备将禁止绑定。其中，这个timeout的有效值在1到65之间，如果大于64也处于绑定模式，时间默认的还是64.
+调用该函数使调适给定的时间内进入允许绑定模式。一个在允许绑定模式下同等的设备调用函数zb_BindDevice()能与之建立绑定，目的地址为空。也就是源设备也处于允许绑定的模式，在里面调用函数afSetMatch()，使之允许响应ZDO的匹配描述符请求。
+   在目的设备处于允许绑定的模式的时间内，源设备可以调用函数zb_BindDevice()发起绑定请求。
+
+设置允许反应的标志
+uint8 afSetMatch( uint8 ep, uint8 action )
+{
+  epList_t *epSearch;
+  // Look for the endpoint 寻找EP
+  epSearch = afFindEndPointDescList( ep );
+ 
+  if ( epSearch )
+  {
+    if ( action )
+    {
+      epSearch->flags |= eEP_AllowMatch;
+    }
+    else
+    {
+      epSearch->flags &= (0xff ^ eEP_AllowMatch);
+    }
+    return ( TRUE );
+  }
+  else
+    return ( FALSE );
+}
+ 
+static epList_t *afFindEndPointDescList( byte EndPoint )
+{
+  epList_t *epSearch;
+ 
+  // Start at the beginning
+  epSearch = epList;
+ 
+  // Look through the list until the end 遍历链表
+  while ( epSearch )
+  {
+    // Is there a match? 找到匹配的
+    if ( epSearch->epDesc->endPoint == EndPoint )
+    {
+      return ( epSearch );
+    }
+    else
+      epSearch = epSearch->nextDesc;  // Next entry
+  }
+ 
+  return ( (epList_t *)NULL );
+}
+ 
+    调用函数zb_BindDevice()发起绑定请求的实现代码在上面也已经一起分析过了，为了完整也放在下面。
+else //未知扩展地址的绑定 *pDestination为NULL
+      {
+        ret = ZB_INVALID_PARAMETER;
+        destination.addrMode = Addr16Bit; //设置16位短地址
+        destination.addr.shortAddr = NWK_BROADCAST_SHORTADDR;//广播模式
+//比较输出簇commandId是否和本终端输出簇列表中有匹配项，成功匹配返回TRUE
+        if(ZDO_AnyClusterMatches(1,&commandId,
+sapi_epDesc.simpleDesc->AppNumOutClusters,
+                                sapi_epDesc.simpleDesc->pAppOutClusterList ) )
+        {
+          // Try to match with a device in the allow bind mode 匹配一个在允许绑定模式下的设备
+          ret = ZDP_MatchDescReq( &destination, NWK_BROADCAST_SHORTADDR,
+              sapi_epDesc.simpleDesc->AppProfId, 1, &commandId, 0, (cId_t *)NULL, 0 );
+        }
+//如果commandId是输入簇，则查找本地输入簇列表中是否有匹配项
+        else  if(  ZDO_AnyClusterMatches(1,&commandId, sapi_epDesc.simpleDesc->AppNumInClusters,
+                 sapi_epDesc.simpleDesc->pAppInClusterList ) )
+        { //匹配一个在允许绑定模式的设备
+          ret = ZDP_MatchDescReq( &destination, NWK_BROADCAST_SHORTADDR,
+              sapi_epDesc.simpleDesc->AppProfId, 0, (cId_t *)NULL, 1, &commandId, 0 );
+        }
+ 
+        if ( ret == ZB_SUCCESS )//如果匹配成功
+        {
+          // Set a timer to make sure bind completes 设置一个时间，确保绑定完成
+          osal_start_timerEx(sapi_TaskID, ZB_BIND_TIMER, AIB_MaxBindingTime);
+          sapi_bindInProgress = commandId; //允许基于命令的绑定过程
+          return; // dont send cback event
+        }
+      }
+    }
+ 
+    SAPI_SendCback( SAPICB_BIND_CNF, ret, commandId );
+  }
+．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．
+｝
+    在这其中调用了函数ZDP_MatchDescReq()，将建立和发送一个匹配描述符（Match Description）请求，用这个函数在一个应用中的输入/输出簇列表中搜索匹配某条件的设备/应用。
+afStatus_t ZDP_MatchDescReq( zAddrType_t *dstAddr, uint16 nwkAddr,
+                                uint16 ProfileID,
+                                byte NumInClusters, cId_t *InClusterList,
+                                byte NumOutClusters, cId_t *OutClusterList,
+                                byte SecurityEnable )
+其中：
+dstArr:目的地址
+nwkAddr:已知的16位网络地址
+ProfileID:应用模式（Application’s Profile）ID，为簇ID作为参考
+NumInClusters：输入簇ID的队列
+NumOutClusters：在输出簇列表中簇ID的数量
+OutClusterList：输出簇列表中簇ID的数量
+OutClusterLIst：输出簇ID的队列
+SecuritySuite:信息安全类型
+返回：无
+   查找到一个匹配描述符后，调用AF_DataRequest（）函数发送。该绑定的响应处理在SAPI_ProcessEvent()函数中。这个应该是源设备的响应。，该事件属于SYS_EVENT_MSG强制事件的子事件 。
+case  ZDO_CB_MSG:
+          SAPI_ProcessZDOMsgs( (zdoIncomingMsg_t *)pMsg );
+          break;
+    下面是SAPI_ProcessZDOMsgs()函数，在SAPI_Init()函数中注册了以下两个ZDO信息
+//  ZDO_RegisterForZDOMsg( sapi_TaskID, NWK_addr_rsp );
+//  ZDO_RegisterForZDOMsg( sapi_TaskID, Match_Desc_rsp );
+void SAPI_ProcessZDOMsgs( zdoIncomingMsg_t *inMsg )
+{
+  switch ( inMsg->clusterID )
+  {
+   ．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．．
+    case Match_Desc_rsp:
+      {
+        zAddrType_t dstAddr;
+        ZDO_ActiveEndpointRsp_t *pRsp = ZDO_ParseEPListRsp( inMsg );
+ 
+        if ( sapi_bindInProgress != 0xffff )
+        {
+          // Create a binding table entry 创建绑定表的实体
+          dstAddr.addrMode = Addr16Bit;
+          dstAddr.addr.shortAddr = pRsp->nwkAddr;
+         //调用和上次一样的函数，实现绑定
+          if ( APSME_BindRequest( sapi_epDesc.simpleDesc->EndPoint,
+                     sapi_bindInProgress, &dstAddr, pRsp->epList[0] ) == ZSuccess )
+          { //zb_BindDevice()中开启了一个定时器，
+osal_start_timerEx(sapi_TaskID, ZB_BIND_TIMER, AIB_MaxBindingTime);
+用于接收Match_Desc_rsp事件计时
+ //如果接收到，则停止这个定时器；如果溢出，则触发相应任务事件
+            osal_stop_timerEx(sapi_TaskID,  ZB_BIND_TIMER);
+            osal_start_timerEx( ZDAppTaskID, ZDO_NWK_UPDATE_NV, 250 );
+            sapi_bindInProgress = 0xffff;
+ 
+            // Find IEEE addr 查找IEEE地址
+            ZDP_IEEEAddrReq( pRsp->nwkAddr, ZDP_ADDR_REQTYPE_SINGLE, 0, 0 );
+            // Send bind confirm callback to application 向应用程序发送绑定确认消息
+            zb_BindConfirm( sapi_bindInProgress, ZB_SUCCESS );
+          }
+        }
+      }
+      break;
+  }
+}
+    以上程序中介绍了两种绑定方式中，最终都是调用函数APSME_BindRequest()创建绑定，不同的是，前者采用的目的地址是64位扩展地址，而后者采用的是目的地址是16位网络地址，前者已知扩展地址，调用了ZDP_NwkAddrReq（）函数获得目的设备的短地址，后者利用描述匹配得到了短地址，然后调用了ZDP_IEEEAddrReq（）函数，获取设备的扩展地址。下一篇文章将跟踪SiampleApp例程查看绑定的过程。
