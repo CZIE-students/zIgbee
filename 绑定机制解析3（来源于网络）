@@ -1,0 +1,468 @@
+通过SimpleApp例程理解绑定的流程（三） 2010-12-04 11:37:40
+分类： 嵌入式
+   下面我们跟踪灯开关实验中的流程，看一下，绑定是怎么在灯和开关之间形成的。
+   《zigbee2006无线网络与无线定位实战》这本书中，对灯开关实验中的绑定进行总结了五个主要的步骤，我们就从这几个步骤中一步一步的分析这个实验绑定的实现。
+(1)首先调用zb_AllowBind(myAllowBindTimeout)函数，使管理设备(灯)处于允许绑定(匹配)响应模式
+(2)在myAllowBindTimeout规定的时间内，终端设备需要调用zb_BindDevice(TRUE, TOGGLE_LIGHT_CMD_ID,    NULL)函数发送绑定(描述符匹配ZDP_MatchDescReq)请求.
+(3)当管理器接收到匹配请求后，对该匹配作出响应，发送一个匹配响应(P:在ZDO_ProcessMatchDescReq()函   数中)，之后可以看到发送匹配响应后的确认事件(P:在ZDO_ProcessMatchDescReq()函数中)：
+   pRspSent->hdr.event = ZDO_MATCH_DESC_RSP_SENT;
+(4)当终端接收到匹配响应后，产生该事件:
+      case Match_Desc_rsp：
+   该事件详细处理过程参见SAPI_ProcessZDOMsgs，这里面调用了APSME_BindRequest()建立绑定，而且调用了ZDP_IEEEAddrReq()得到被绑定的IEEE地址.
+(5)最后完成绑定,在终端设备建立绑定表格.
+这个实验中控制设备（simple controller 灯）担任协调器的角色，开关设备（simple switch）担任终端设备。控制设备负责建立网络，开头设备加入网络并与控制设备建立绑定后，可以通过开关设备发送命令切换控制设备的状态 。
+采用下面的控制方式来创建绑定：
+通过按某个控制器的S1使它进行允许绑定模式
+在某个灯开关上按下S1（10s 之内）发出绑定请求
+这就将使该开关设备绑定到该（处于绑定模式下的）管理器设备上
+当开关绑定成功后，（开关设备上）LED1闪亮      
+之后，开关设备上的S4被按下就将发送切换命令，它将使对应的管理器高处 的LED1状态切换
+如果开关设备上的S3按下，它将移除该设备上的所有绑定
+（1）使管理设备（灯）处于允许绑定模式。也就是调用函数zb_AllowBind（）
+void zb_AllowBind ( uint8 timeout )
+{
+  osal_stop_timerEx(sapi_TaskID, ZB_ALLOW_BIND_TIMER);
+ 
+  if ( timeout == 0 )
+  {
+    afSetMatch(sapi_epDesc.simpleDesc->EndPoint, FALSE);
+  }
+  else
+  {
+  //设置允许设备响应ZDO的描述符匹配请求
+    afSetMatch(sapi_epDesc.simpleDesc->EndPoint, TRUE);
+    if ( timeout != 0xFF )
+    {
+      if ( timeout > 64 )
+      {
+        timeout = 64;
+      }
+ 
+控制设备在zb_HandleKeys()函数中调用了zb_AllowBind（）函数，
+void zb_HandleKeys( uint8 shift, uint8 keys )
+{
+  uint8 startOptions;
+  uint8 logicalType;
+ 
+  // Shift is used to make each button/switch dual purpose.双击按下，这里没有处理，
+  if ( shift )
+  {
+    if ( keys & HAL_KEY_SW_1 )
+    {
+    }
+    if ( keys & HAL_KEY_SW_2 )
+    {
+    }
+    if ( keys & HAL_KEY_SW_3 )
+    {
+    }
+    if ( keys & HAL_KEY_SW_4 )
+    {
+    }
+  }
+  else //单击按键
+  {
+    if ( keys & HAL_KEY_SW_1 )
+    {
+      if ( myAppState == APP_INIT  )
+      {
+        // In the init state, keys are used to indicate the logical mode.
+        // Key 1 starts device as a coordinator
+        //在初始化状态，键盘用于指示设备逻辑械 也就是说设备是协调器还是终端设备， S1按下作为协调器启动
+        zb_ReadConfiguration( ZCD_NV_LOGICAL_TYPE, sizeof(uint8), &logicalType );
+        if ( logicalType != ZG_DEVICETYPE_ENDDEVICE )
+        {
+          logicalType = ZG_DEVICETYPE_COORDINATOR;
+          zb_WriteConfiguration(ZCD_NV_LOGICAL_TYPE, sizeof(uint8), &logicalType);
+        }
+ 
+        // Do more configuration if necessary and then restart device with auto-start bit set
+        // write endpoint to simple desc...dont pass it in start req..then reset
+        //配置完成后，然后，使设备进入自动启动模式，设置自动启动标志后，复位重新启动设备。
+        zb_ReadConfiguration( ZCD_NV_STARTUP_OPTION, sizeof(uint8), &startOptions );
+        startOptions = ZCD_STARTOPT_AUTO_START;
+        zb_WriteConfiguration( ZCD_NV_STARTUP_OPTION, sizeof(uint8), &startOptions );
+        zb_SystemReset();
+      }
+      else
+      {
+        // Initiate a binding 允许绑定 设备启动以后myAppState= APP_START，将允许绑定。其中myAllowBindTimeout=10，表示在10s之内允许其他民控制设备建立绑定。
+        zb_AllowBind( myAllowBindTimeout );
+      }
+    }
+    if ( keys & HAL_KEY_SW_2 )
+    {
+      if ( myAppState == APP_INIT )
+      {
+        // In the init state, keys are used to indicate the logical mode.
+        // Key 2 starts device as a router
+       //在初始化状态，键盘用于指示设备逻辑械 也就是说设备是协调器还是终端设备， S4按下作为协调器启动
+        zb_ReadConfiguration( ZCD_NV_LOGICAL_TYPE, sizeof(uint8), &logicalType );
+        if ( logicalType != ZG_DEVICETYPE_ENDDEVICE )
+        {
+          logicalType = ZG_DEVICETYPE_ROUTER;
+          zb_WriteConfiguration(ZCD_NV_LOGICAL_TYPE, sizeof(uint8), &logicalType);
+        }
+ 
+        zb_ReadConfiguration( ZCD_NV_STARTUP_OPTION, sizeof(uint8), &startOptions );
+        startOptions = ZCD_STARTOPT_AUTO_START;
+        zb_WriteConfiguration( ZCD_NV_STARTUP_OPTION, sizeof(uint8), &startOptions );
+        zb_SystemReset();
+      }
+      else
+      {
+      }
+    } //S3 S4没有使用
+    if ( keys & HAL_KEY_SW_3 )
+    {
+    }
+    if ( keys & HAL_KEY_SW_4 )
+    {
+    }
+  }
+}
+允许绑定实际上是调用了afSetMatch，设置允许反应的标志
+uint8 afSetMatch( uint8 ep, uint8 action )
+{
+  epList_t *epSearch;
+  // Look for the endpoint 寻找EP，找到后设置允许匹配标志位
+  epSearch = afFindEndPointDescList( ep );
+  if ( epSearch )
+  {
+    if ( action )
+    {
+      epSearch->flags |= eEP_AllowMatch;
+    }
+    else
+    {
+      epSearch->flags &= (0xff ^ eEP_AllowMatch);
+    }
+    return ( TRUE );
+  }
+  else
+    return ( FALSE );
+}
+ 
+static epList_t *afFindEndPointDescList( byte EndPoint )
+{
+  epList_t *epSearch;
+  // Start at the beginning
+  epSearch = epList;
+  // Look through the list until the end 遍历链表
+  while ( epSearch )
+  {
+    // Is there a match? 找到匹配的
+    if ( epSearch->epDesc->endPoint == EndPoint )
+    {
+      return ( epSearch );
+    }
+    else
+      epSearch = epSearch->nextDesc;  // Next entry
+  }
+  return ( (epList_t *)NULL );
+}
+（2）有了允许绑定就会有绑定请求，在myAllowBindTimeout规定的时间内，终端设备调用zb_BindDevice()函数，请求绑定。由于zb_BindDevice()函数的第三个参数是NULL，所以是以，未知IEEE地址的绑定。在zb_HandleKeys()函数中调用了，
+zb_BindDevice(TRUE, TOGGLE_LIGHT_CMD_ID, NULL); zb_BindDevice函数中调用了ZDP_MatchDescReq()函数，
+这个函数的参数，在上一篇文章中也做了介绍，这个函数是是初始化一个匹配描述符请求，也就是发现服务，或者叫自动寻求匹配设备。其中destination.addr.shortAddr = NWK_BROADCAST_SHORTADDR;
+afStatus_t ZDP_MatchDescReq( zAddrType_t *dstAddr, uint16 nwkAddr,
+                                uint16 ProfileID,
+                                byte NumInClusters, cId_t *InClusterList,
+                                byte NumOutClusters, cId_t *OutClusterList,
+                                byte SecurityEnable )
+{
+  byte *pBuf = ZDP_TmpBuf;
+  // nwkAddr+ProfileID+NumInClusters+NumOutClusters.
+  byte i, len = 2 + 2 + 1 + 1;  // nwkAddr+ProfileID+NumInClusters+NumOutClusters.
+ 
+  len += (NumInClusters + NumOutClusters) * sizeof(uint16);
+ 
+  if ( len >= ZDP_BUF_SZ-1 )
+  {
+    return afStatus_MEM_FAIL;
+  }
+ 
+  *pBuf++ = LO_UINT16( nwkAddr );   // NWKAddrOfInterest
+  *pBuf++ = HI_UINT16( nwkAddr );
+ 
+  *pBuf++ = LO_UINT16( ProfileID );   // Profile ID
+  *pBuf++ = HI_UINT16( ProfileID );
+ 
+  *pBuf++ = NumInClusters; // Input cluster list
+  if ( NumInClusters )
+  {
+    for (i=0; i<NumInClusters; ++i)  {
+      *pBuf++ = LO_UINT16( InClusterList[i] );
+      *pBuf++ = HI_UINT16( InClusterList[i] );
+    }
+  }
+ 
+  *pBuf++ = NumOutClusters; // Output cluster list
+  if ( NumOutClusters )
+  {
+    for (i=0; i<NumOutClusters; ++i)  {
+      *pBuf++ = LO_UINT16( OutClusterList[i] );
+      *pBuf++ = HI_UINT16( OutClusterList[i] );
+    }
+  }
+  //注意这里clusterID设置为Match_Desc_req
+  return fillAndSend( &ZDP_TransID, dstAddr, Match_Desc_req, len );
+}
+    在ZDP_MatchDescReq配置了clusterID是Match_Desc_req，dstAddr为广播地址，填充了数据信息ZDP_TmpBuf。最后调用fillAndSend函数。
+static afStatus_t fillAndSend( uint8 *transSeq, zAddrType_t *addr, cId_t clusterID, byte len )
+{
+  afAddrType_t afAddr;
+ 
+  ZADDR_TO_AFADDR( addr, afAddr );
+ 
+  *(ZDP_TmpBuf-1) = *transSeq;
+ //通过AF_DataRequest函数发送得到的短地址
+  return AF_DataRequest( &afAddr, &ZDApp_epDesc, clusterID,
+                           (uint16)(len+1), (uint8*)(ZDP_TmpBuf-1),
+                           transSeq, ZDP_TxOptions,  AF_DEFAULT_RADIUS );
+ 
+}
+   程序的最后调用了AF_DataRequest，以广播的方式即将匹配消息发送出去。匹配消息发送去后，就等待其它设备的响应，这里响应的设备应该是控制设备。
+（3）  控制接收到匹配请求后，对其匹配作出响应。那就看看控制设备是如何反应的，在这个例子中也就是灯的反应过程。
+目的设备收到绑定请求帧数据后生成ZDAppTaskID任务的AF_INCOMING_MSG_CMD事件。收到数据后，首先调用ZDAppTaskID任务的事件处理函数ZDApp_event_loop（），然后调用ZDApp_ProcessOSALMsg（）函数，在这个函数中调用ZDP_IncomingData函数。
+case AF_INCOMING_MSG_CMD:
+      ZDP_IncomingData( (afIncomingMSGPacket_t *)msgPtr );
+      break;
+    在这里调用了ZDP_IncomingData()函数，下面是这个函数的源代码。这个函数表明了PDU数据从APS子层->ZDO层的数据传输。因为ZDO层是管理绑定的(绑定表建在APS中),管理器接收到的描述符匹配请求是发往其ZDO层的。ZDO_SendMsgCBs函数会生成sapi_TaskID的ZDO_CB_MSG事件，进而执行SAPI_ProcessZDOMsgs(…)函数中的Match_Desc_rsp选项。
+void ZDP_IncomingData( afIncomingMSGPacket_t *pData )
+{
+  uint8 x = 0;
+  uint8 handled;
+  zdoIncomingMsg_t inMsg;
+ 
+  inMsg.srcAddr.addrMode = Addr16Bit;
+  inMsg.srcAddr.addr.shortAddr = pData->srcAddr.addr.shortAddr;
+  inMsg.wasBroadcast = pData->wasBroadcast;
+  inMsg.clusterID = pData->clusterId;
+  inMsg.SecurityUse = pData->SecurityUse;
+ 
+  inMsg.asduLen = pData->cmd.DataLength-1;
+  inMsg.asdu = pData->cmd.Data+1;
+  inMsg.TransSeq = pData->cmd.Data[0];
+   //通过 ZDO_SendMsgCBs()这个函数把ZDO信息发送到注册过ZDO信息的任务中去.比如sapi中SAPI_Init()注册过两种类型clusterId的ZDO信息：NWK_addr_rsp 和 Match_Desc_rsp因此其它命令，比如匹配请求命令Match_Desc_rep不会发送到sapi应用层中注意，End_Device_Bind_req这个ZDO信息是注册在ZDAppTaskID任务中的.
+  handled = ZDO_SendMsgCBs( &inMsg );
+ 
+#if defined( MT_ZDO_FUNC )
+  MT_ZdoRsp( &inMsg );
+#endif
+ //注意，这里只会对请求/设置/通知命令才调用相应处理函数，如果是响应命令则不处理。但是要ZDO信息处理表中包含的命令才有相应的处理函数,有些没有的就不会调用
+  while ( zdpMsgProcs[x].clusterID != 0xFFFF )
+  {
+    if ( zdpMsgProcs[x].clusterID == inMsg.clusterID )
+    {
+      zdpMsgProcs[x].pFn( &inMsg );
+      return;
+    }
+    x++;
+  }
+ 
+  // Handle unhandled messages
+  if ( !handled )
+    ZDApp_InMsgCB( &inMsg );
+}
+ 
+说明：我们这里重点说明两个函数：
+（1）ZDO_SendMsgCBs( &inMsg ); 把ZDO接收信息发送到注册过ZDO信息的任务中去；具体流程是比较接收信息的簇ID与注册过的簇ID,有相同则调用osal_msg_send()触发相应任务事件，事件这里默认为ZDO_CB_MSG，因此可以看到SAPI_ProcessEvent()中有这个事件.注意这个函数只会传送信息到注册过相应ZDO信息的任务中去。
+我们看看它是为什么只发送注册过的簇ID。下面是这个函数的源代码：
+uint8 ZDO_SendMsgCBs( zdoIncomingMsg_t *inMsg )
+{
+  uint8 ret = FALSE;
+  ZDO_MsgCB_t *pList = zdoMsgCBs;
+  while ( pList )
+  {
+  //接收到的簇ID和注册过的簇ID进行比较
+    if ( pList->clusterID == inMsg->clusterID )
+    {
+      zdoIncomingMsg_t *msgPtr;
+ 
+      // Send the address to the task
+      msgPtr = (zdoIncomingMsg_t *)osal_msg_allocate( sizeof( zdoIncomingMsg_t ) + inMsg->asduLen );
+      if ( msgPtr )
+      {
+        // copy struct
+        osal_memcpy( msgPtr, inMsg, sizeof( zdoIncomingMsg_t ));
+       
+        if ( inMsg->asduLen )
+        {
+          msgPtr->asdu = (byte*)(((byte*)msgPtr) + sizeof( zdoIncomingMsg_t ));
+          osal_memcpy( msgPtr->asdu, inMsg->asdu, inMsg->asduLen );
+        }
+   
+        msgPtr->hdr.event = ZDO_CB_MSG;
+        osal_msg_send( pList->taskID, (uint8 *)msgPtr );
+        ret = TRUE;
+      }
+    }
+    pList = (ZDO_MsgCB_t *)pList->next;
+  }
+  return ( ret );
+} 
+   通过代码我们可以看到，这个函数首先是查找一个链表，看看这个链表到底是指向什么的，有下面这样一句话，pList指向了zdoMsgCBs。它的结构定义也如下：
+ZDO_MsgCB_t *pList = zdoMsgCBs;
+ZDO_MsgCB_t *zdoMsgCBs = (ZDO_MsgCB_t *)NULL;
+typedef struct
+{
+  void *next;
+  uint8 taskID;
+  uint16 clusterID;
+} ZDO_MsgCB_t;
+   我们搜索代码可以发现，只有在这个函数中有对ZDO_MsgCB_t的赋值，也就是作为左值。
+ZStatus_t ZDO_RegisterForZDOMsg( uint8 taskID, uint16 clusterID )
+｛
+……………………..
+zdoMsgCBs = pNew;
+……………………………
+｝
+   这个函数的意思就是注册ZDO消息，我们可以回过头来看一下ZDO_SendMsgCBs（）函数，这个函数中有了个while(pList);的循环，如果没有在ZDO_RegisterForZDOMsg（）函数中注册的话，那意味着，这个循环是不成立的，也就是说为什么只有ZDO消息注册后才会真正的执行这个函数，但又有一个问题，在SAPI_Init ()函数中，我们可以发现下面两句话
+ZDO_RegisterForZDOMsg( sapi_TaskID, NWK_addr_rsp );
+ZDO_RegisterForZDOMsg( sapi_TaskID, Match_Desc_rsp )
+   在这里对这两个响应消息进行了注册，注意这里的任务ID都是sapi_TaskID,还有一个地方也对End_Device_Bind_req进行了注册，也就是在ZDApp_RegisterCBs( void )函数中，这个函数在初始化函数ZDApp_Init( taskID++ );中被调用。当然这里还注册了很多其它的消息。问题就又来了，那既然这个链表是不为空的，这个函数的while(pList);就会成功执行，但下面还有一层验证就是簇ID，不要忘记我们的簇ID是什么，我们收到是Match_Desc_rep；而我们注册的是Match_Desc_rsp。所以在这个链表中找不到这个簇ID，所以也就不会触发msgPtr->hdr.event = ZDO_CB_MSG;继续向下执行。也就执行到了zdpMsgProcs[x].pFn(&inMsg)处理函数中
+   从这里我们也可以总结一下，我们知道在ZigBee中有四种格式的原语，分别是Request，Indication，Response，Confirm，这里注册的XX_XX_req,就表示的是请求消息，XX_XX_rsp就是响应消息。一定要注意的时这里只相差一个字母的区别。
+(2)对于zdpMsgProcs[x].pFn( &inMsg )，ZDProfile.c如下定义：
+把pfnZDPMsgProcessor声明为一种带一个参数的函数指针的类型别名,指向类似Fun(*inMsg)这种类型的函数.如果用此别名来声明一个指针变量，如:pfnZDPMsgProcessor pFn,则当pFn获取函数的地址后，就可以像调用原函数一样来使用这个函数指针：pFn(*inMsg)
+typedef void (*pfnZDPMsgProcessor)( zdoIncomingMsg_t *inMsg );
+typedef struct
+{
+  uint16                clusterID;
+  pfnZDPMsgProcessor    pFn;
+} zdpMsgProcItem_t;
+//定义一个zdpMsgProcItem_t类型的数组zdpMsgProcs[]，则数组zdpMsgProcs[]中的每个元素都是zdpMsgProcItem_t类型的结构体:{clusterID,pFn}，也就是一个是簇ID，另一个是相对应的处理函数。
+CONST zdpMsgProcItem_t zdpMsgProcs[ ] =
+{
+  { NWK_addr_req,           zdpProcessAddrReq },
+  { IEEE_addr_req,          zdpProcessAddrReq },
+  { Node_Desc_req,          ZDO_ProcessNodeDescReq },
+  { Power_Desc_req,         ZDO_ProcessPowerDescReq },
+  { Simple_Desc_req,        ZDO_ProcessSimpleDescReq },
+  { Active_EP_req,          ZDO_ProcessActiveEPReq },
+  { Match_Desc_req,         ZDO_ProcessMatchDescReq },
+   …………(后面省略)
+  {0xFFFF, NULL}  // Last
+};
+   既然ZDO_SendMsgCBs（）函数不执行，那么就会查找ZDO信息处理表,当x=6时发现命令相符，两个簇ID相同，则调用ZDO_ProcessMatchDescReq()对描述符匹配请求进行处理.
+下面来看下ZDO_ProcessMatchDescReq()函数：
+void ZDO_ProcessMatchDescReq( zdoIncomingMsg_t *inMsg )
+{
+  …………
+  // Parse the incoming message
+     …………
+//--------------------------发送描述符匹配请求的响应
+  if ( ADDR_BCAST_NOT_ME == NLME_IsAddressBroadcast(aoi) )
+  {
+    ZDP_MatchDescRsp( inMsg->TransSeq, &(inMsg->srcAddr), ZDP_INVALID_REQTYPE,
+                          ZDAppNwkAddr.addr.shortAddr, 0, NULL, inMsg->SecurityUse );
+    return;
+  }
+  else if ( (ADDR_NOT_BCAST == NLME_IsAddressBroadcast(aoi)) && (aoi != ZDAppNwkAddr.addr.shortAddr) )
+  {
+    ZDP_MatchDescRsp( inMsg->TransSeq, &(inMsg->srcAddr), ZDP_INVALID_REQTYPE,
+                             ZDAppNwkAddr.addr.shortAddr, 0, NULL, inMsg->SecurityUse );
+    return;
+  }
+//--------------------------
+        …………
+        //发送匹配响应后的确认事件ZDO_MATCH_DESC_RSP_SENT
+        pRspSent->hdr.event = ZDO_MATCH_DESC_RSP_SENT;
+        …………
+        osal_msg_send( *epDesc->epDesc->task_id, (uint8 *)pRspSent );
+          
+        …………
+}
+    可以看到这里管理器首先通过ZDP_MatchDescRsp()发送匹配响应给终端.而ZDP_MatchDescRsp()宏定义为ZDP_EPRsp()，
+#define ZDP_MatchDescRsp( TransSeq, dstAddr, Status, nwkAddr, Count, \
+                  pEPList, SecurityEnable ) \
+                      ZDP_EPRsp( Match_Desc_rsp, TransSeq, dstAddr, Status, \
+                           nwkAddr, Count, pEPList, SecurityEnable )
+ZDP_EPRsp()设置clusterID为Match_Desc_rsp并调用FillAndSendTxOptions()，
+FillAndSendTxOptions()中调用fillAndSend()，fillAndSend()中最终调用AF_DataRequest()来发送匹配响应给终端。发送完匹配响应后管理器触发一个确认事件ZDO_MATCH_DESC_RSP_SENT，来指示有个设备试图与自己绑定.管理器是如何对这个确认事件进行处理的?如下：
+SAPI_ProcessEvent()中对ZDO_MATCH_DESC_RSP_SENT的处理：
+          case ZDO_MATCH_DESC_RSP_SENT: /*发送匹配响应*/
+          SAPI_AllowBindConfirm( ((ZDO_MatchDescRspSent_t *)pMsg)->nwkAddr );
+来看下SAPI_AllowBindConfirm()这个函数：
+******************************************
+ * @fn          SAPI_AllowBindConfirm
+ *
+ * @brief       Indicates when another device attempted to bind to this device
+ *
+ * @param
+ *
+ * @return      none
+ */
+void SAPI_AllowBindConfirm( uint16 source )
+{
+  #if defined ( MT_SAPI_CB_FUNC )
+  /* First check if MT has subscribed for this callback. If so , pass it as
+  a event to MonitorTest and return control to calling function after that */
+  if ( SAPICB_CHECK( SPI_CB_SAPI_ALLOW_BIND_CNF ) )
+  {
+    zb_MTCallbackAllowBindConfirm( source ); 
+  }
+  else
+#endif  //MT_SAPI_CB_FUNC
+  {
+    zb_AllowBindConfirm( source ); //未定义
+  }
+}
+******************************************
+   管理器接收到终端发送的描述符匹配请求后,发送一个描述符匹配请求的响应给终端,并触发一个确认事件指示有个设备试图与本设备进行绑定.
+（4） 终端接收到管理器发送过来的描述符匹配响应
+       终端接收到数据后生成ZDAppTaskID任务的AF_INCOMING_MSG_CMD事件。调用ZDP_IncomingData(…)函数，在函数中调用ZDO_SendMsgCBs(…)函数。ZDO_SendMsgCBs函数会生成sapi_TaskID的ZDO_CB_MSG事件，进而执行SAPI_ProcessZDOMsgs(…)函数中的Match_Desc_rsp选项。
+   在ZDP_IncomingData()函数中，这次会调用ZDO_SendMsgCBs()函数，因为在SAPI_Init()函数中，对Match_Desc_rsp进行了注册，这次在终端收到的是匹配请求响应，ZDO_RegisterForZDOMsg( sapi_TaskID, Match_Desc_rsp );这次正好和上一步中收到的Match_Desc_rep相对应，所以下面的zdpMsgProcs[]数组中找不到与Match_Desc_rsp相匹配的项，这时就会触发ZDO_CB_MSG事件。这一步的处理正好上上一步接收到Match_Desc_rep相反。
+   case ZDO_CB_MSG: /*ZDO信息*/
+          SAPI_ProcessZDOMsgs( (zdoIncomingMsg_t *)pMsg );
+          break;
+来看下SAPI_ProcessZDOMsgs()：
+/  SAPI_Init()函数中注册了以下两个ZDO信息
+//  ZDO_RegisterForZDOMsg( sapi_TaskID, NWK_addr_rsp );
+//  ZDO_RegisterForZDOMsg( sapi_TaskID, Match_Desc_rsp );
+void SAPI_ProcessZDOMsgs( zdoIncomingMsg_t *inMsg )
+{
+  switch ( inMsg->clusterID )
+  {
+    //--------------------
+    case NWK_addr_rsp:
+      {
+      …………
+      break;
+      
+    //--------------------
+    case Match_Desc_rsp:
+      {
+        zAddrType_t dstAddr;
+        ZDO_ActiveEndpointRsp_t *pRsp = ZDO_ParseEPListRsp( inMsg );
+        if ( sapi_bindInProgress != 0xffff ) //允许基于commandID的绑定
+        {
+          // Create a binding table entry 创建一个绑定条目
+          dstAddr.addrMode = Addr16Bit;            
+          dstAddr.addr.shortAddr = pRsp->nwkAddr; //通过描述符匹配响应信息得到管理器的网络地址 
+          /*调用这个函数来实现两个设备的绑定*/
+          if ( APSME_BindRequest( sapi_epDesc.simpleDesc->EndPoint, //源EP
+                                 sapi_bindInProgress,  //簇ID
+                                &dstAddr,              //目的地址模式
+                       pRsp->epList[0] ) == ZSuccess )    //目的EP
+          //成功实现绑定后
+          {
+         //zb_BindDevice()中开启了一个定时器，用于接收Match_Desc_rsp计时
+      //如果接收到，则停止这个定时器，如下；如果溢出，则触发相应任务事件
+            osal_stop_timerEx(sapi_TaskID,  ZB_BIND_TIMER);
+            osal_start_timerEx( ZDAppTaskID, ZDO_NWK_UPDATE_NV, 250 );
+            sapi_bindInProgress = 0xffff;//不允许绑定过程
+            // Find IEEE addr  
+            ZDP_IEEEAddrReq( pRsp->nwkAddr, ZDP_ADDR_REQTYPE_SINGLE, 0, 0 );
+            // Send bind confirm callback to application
+            //告诉应用绑定成功
+            zb_BindConfirm( sapi_bindInProgress, ZB_SUCCESS );
+          }
+        }
+      }
+      break;
+  }
+}
+   可以看到通过接收到的描述符匹配响应信息，终端获得允许绑定模式下管理器的16位网络地址：
+dstAddr.addr.shortAddr = pRsp->nwkAddr;最终调用APSME_BindRequest()来绑定终端设备与管理器.这样整个的绑定过程就结束，两个设备之间就可以进行相互的通信。这里采用的手动绑定的过程。很多情况下应该是自动绑定的。
+   这里主要参考了小峰的博客：http://wjf88223.blog.163.com/
+其实他写的已经挺好了，不过为了自己理解的更透，所以自己也花了点时间记录整理了一下。
